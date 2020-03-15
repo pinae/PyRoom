@@ -67,11 +67,12 @@ class Food(Entity):
     name = str
     calories = float
     last_log = datetime
+    importance = float
 
 
 if __name__ == "__main__":
     db = Database()
-    foo = Food(datetime.now(), "Fu-Kuchen", 53, calories=123.)
+    foo = Food(datetime.now(), "Fu-Kuchen", 53, calories=123., importance=3.2)
     c = db.conn.cursor()
     print("…sql…", foo.create_table_sql())
     c.execute(foo.create_table_sql())
@@ -81,5 +82,11 @@ if __name__ == "__main__":
     print("…sql…values…", foo.values())
     c.execute(foo.insert_sql(), foo.values())
     db.conn.commit()
+    import time
+    time.sleep(0.5)
     qc = db.conn.cursor()
+    qc.execute(
+        "UPDATE `Food` SET importance = (importance - (julianday(?) - julianday(last_log)) * importance); ",
+        (datetime.now(),))
+    db.conn.commit()
     print(qc.execute("SELECT * FROM `Food`").fetchall())
