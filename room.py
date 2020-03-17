@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import cast, Sequence
+from typing import cast, Sequence, List, TypeVar
 import sqlite3
 import inspect
 
@@ -18,7 +18,7 @@ class Dao:
     def __init__(self, room_db: Database):
         self.db = room_db
 
-    def check_table_exists(self, table_name: str):
+    def check_table_exists(self, table_name: str) -> bool:
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{0}'".format(table_name))
         return cursor.fetchone()[0] > 0
@@ -28,7 +28,7 @@ class KeyAnnotationClass:
     def __init__(self, key_type):
         self.t = key_type
 
-    def get_type(self):
+    def get_type(self) -> type:
         return self.t
 
 
@@ -45,6 +45,9 @@ class PrimaryKey(KeyAnnotationClass):
             return 'TEXT'
         elif self.t is bytes:
             return 'BLOB'
+
+
+PropertyType = TypeVar('PropertyType', type, PrimaryKey)
 
 
 class Entity:
@@ -66,7 +69,7 @@ class Entity:
                 raise SyntaxError(col + " is not in **kwargs or *args or has the wrong type." +
                                   " This is expected: " + str(self.__cols__()))
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "<{class_name}: {properties}>".format(
             class_name=self.__class__.__name__,
             properties=", ".join([
@@ -77,11 +80,11 @@ class Entity:
             ]))
 
     @staticmethod
-    def property_types():
+    def property_types() -> List[type]:
         return [int, float, str, bytes, bool, date, datetime]
 
     @staticmethod
-    def __type_to_sql_type__(t: type) -> str:
+    def __type_to_sql_type__(t: PropertyType) -> str:
         if t is int:
             return 'INT'
         elif t is float:
@@ -149,7 +152,7 @@ class Entity:
     @classmethod
     def query(cls, sql: str) -> callable:
         def decorator(func: callable) -> callable:
-            def wrapper(*args, **kwargs):
+            def wrapper(*args, **kwargs) -> List[cls]:
                 param_pos = 0
                 for param in inspect.signature(func).parameters:
                     if param not in kwargs:
@@ -190,11 +193,11 @@ class Food(Entity):
 
 class FoodDao(Dao):
     @Food.query("SELECT * FROM {table}")
-    def allFood(self) -> list:
+    def allFood(self) -> List[Food]:
         pass
 
     @Food.query("SELECT * FROM {table} WHERE name LIKE '%{query}%'")
-    def searchFood(self, query: str) -> list:
+    def searchFood(self, query: str) -> List[Food]:
         pass
 
     @Food.insert()
@@ -203,7 +206,7 @@ class FoodDao(Dao):
 
 
 class MyRoomDatabase(Database):
-    def food_dao(self):
+    def food_dao(self) -> FoodDao:
         return FoodDao(self)
 
 
