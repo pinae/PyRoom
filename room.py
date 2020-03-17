@@ -1,5 +1,7 @@
 from datetime import date, datetime
+from typing import cast, Sequence
 import sqlite3
+import inspect
 
 
 class Database:
@@ -10,6 +12,16 @@ class Database:
 
     def __del__(self):
         self.conn.close()
+
+
+class Dao:
+    def __init__(self, room_db: Database):
+        self.db = room_db
+
+    def check_table_exists(self, table_name: str):
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{0}'".format(table_name))
+        return cursor.fetchone()[0] > 0
 
 
 class KeyAnnotationClass:
@@ -54,11 +66,19 @@ class Entity:
                 raise SyntaxError(col + " is not in **kwargs or *args or has the wrong type." +
                                   " This is expected: " + str(self.__cols__()))
 
-    def __cols__(self) -> list:
-        return [(prop, self.__getattribute__(prop)) for prop in dir(self)
-                if not prop.startswith("_") and (
-                        self.__getattribute__(prop) in [int, float, str, bytes, bool, date, datetime] or
-                        issubclass(type(self.__getattribute__(prop)), KeyAnnotationClass))]
+    def __str__(self):
+        return "<{class_name}: {properties}>".format(
+            class_name=self.__class__.__name__,
+            properties=", ".join([
+                prop + "=" + (str(self._property_values[prop])
+                              if type(self._property_values[prop]) in [int, float, bool] else
+                              '"{}"'.format(str(self._property_values[prop])))
+                for prop, _ in self.__cols__()
+            ]))
+
+    @staticmethod
+    def property_types():
+        return [int, float, str, bytes, bool, date, datetime]
 
     @staticmethod
     def __type_to_sql_type__(t: type) -> str:
@@ -73,9 +93,15 @@ class Entity:
         elif t is None:
             return 'NULL'
         elif type(t) is PrimaryKey:
-            return t.sql_type()
+            return cast(PrimaryKey, t).sql_type()
         else:
             return t.__name__
+
+    @classmethod
+    def __cols__(cls):
+        non_internal = [(prop, inspect.getattr_static(cls, prop)) for prop in dir(cls) if not prop.startswith('_')]
+        return [(prop, t) for prop, t in non_internal if
+                t in cls.property_types() or issubclass(type(t), KeyAnnotationClass)]
 
     def values(self) -> tuple:
         return tuple([self._property_values[prop] for prop in self._property_values.keys()])
@@ -92,17 +118,19 @@ class Entity:
         else:
             raise SyntaxError("No PrimaryKey() found! You have to define exactly one.")
 
-    def create_table_sql(self) -> str:
-        return "CREATE TABLE `{0}`({1})".format(
-            self.__class__.__name__,
+    @classmethod
+    def __create_table_sql__(cls) -> str:
+        return "CREATE TABLE IF NOT EXISTS `{0}`({1})".format(
+            cls.__name__,
             ", ".join([
-                "{0} {1}".format(col, self.__type_to_sql_type__(t)) for col, t in self.__cols__()
+                "{0} {1}".format(col, cls.__type_to_sql_type__(t)) for col, t in cls.__cols__()
             ]))
 
-    def insert_sql(self) -> str:
+    @classmethod
+    def __insert_sql__(cls) -> str:
         return "INSERT INTO {0} VALUES ({1})".format(
-            self.__class__.__name__,
-            ", ".join(list("?"*len(self.__cols__()))))
+            cls.__name__,
+            ", ".join(list("?" * len(cls.__cols__()))))
 
     def update_sql(self) -> str:
         return "UPDATE {0} SET {1} WHERE {2} = {3}".format(
@@ -111,6 +139,45 @@ class Entity:
             self.primary_key(),
             self._property_values[self.primary_key()]
         )
+
+    @classmethod
+    def create_table(cls, dao: Dao):
+        cursor = dao.db.conn.cursor()
+        cursor.execute(cls.__create_table_sql__())
+        dao.db.conn.commit()
+
+    @classmethod
+    def query(cls, sql: str) -> callable:
+        def decorator(func: callable) -> callable:
+            def wrapper(*args, **kwargs):
+                param_pos = 0
+                for param in inspect.signature(func).parameters:
+                    if param not in kwargs:
+                        kwargs[param] = args[param_pos]
+                        param_pos += 1
+                dao = kwargs['self']
+                cls.create_table(dao)
+                cursor = dao.db.conn.cursor()
+                value_dict = kwargs.copy()
+                value_dict.pop('self')
+                cursor.execute(sql.format(cls.__name__, table=cls.__name__, **kwargs))
+                return cursor.fetchall()
+            return wrapper
+        return decorator
+
+    @classmethod
+    def insert(cls) -> callable:
+        def decorator(func: callable) -> callable:
+            def wrapper(*args: cls):
+                assert issubclass(type(args[0]), Dao)
+                dao = cast(Dao, args[0])
+                cls.create_table(dao)
+                objects = cast(Sequence[cls], args[1:])
+                cursor = dao.db.conn.cursor()
+                cursor.executemany(cls.__insert_sql__(), [o.values() for o in objects])
+                dao.db.conn.commit()
+            return wrapper
+        return decorator
 
 
 class Food(Entity):
@@ -121,19 +188,46 @@ class Food(Entity):
     importance = float
 
 
+class FoodDao(Dao):
+    @Food.query("SELECT * FROM {table}")
+    def allFood(self) -> list:
+        pass
+
+    @Food.query("SELECT * FROM {table} WHERE name LIKE '%{query}%'")
+    def searchFood(self, query: str) -> list:
+        pass
+
+    @Food.insert()
+    def insertFood(self, *food: Food):
+        pass
+
+
+class MyRoomDatabase(Database):
+    def food_dao(self):
+        return FoodDao(self)
+
+
 if __name__ == "__main__":
-    db = Database()
+    db = MyRoomDatabase()
+    food_dao = db.food_dao()
+    print(food_dao.searchFood("Kuch"))
+    print(food_dao.allFood())
+    print("---------------")
     foo = Food(datetime.now(), "Fu-Kuchen", 53, calories=123., importance=3.2)
-    print(dir(foo))
+    print(foo)
+    food_dao.insertFood(foo)
+    print(food_dao.searchFood("Kuch"))
+    print(food_dao.allFood())
+    print("---------------")
     print(foo.__cols__())
     c = db.conn.cursor()
-    print("…sql…", foo.create_table_sql())
-    c.execute(foo.create_table_sql())
+    print("…sql…", foo.__create_table_sql__())
+    c.execute(foo.__create_table_sql__())
     db.conn.commit()
     print(c.execute("PRAGMA table_info(`Food`);").fetchall())
-    print("…sql…", foo.insert_sql())
+    print("…sql…", foo.__insert_sql__())
     print("…sql…values…", foo.values())
-    c.execute(foo.insert_sql(), foo.values())
+    c.execute(foo.__insert_sql__(), foo.values())
     db.conn.commit()
     import time
     time.sleep(0.5)
@@ -144,7 +238,7 @@ if __name__ == "__main__":
     db.conn.commit()
     print(qc.execute("SELECT * FROM `Food`").fetchall())
     bar = Food(uid=1, name="Bar Bean", calories=612., last_log=datetime.now(), importance=1.)
-    c.execute(bar.insert_sql(), bar.values())
+    c.execute(bar.__insert_sql__(), bar.values())
     qc.execute("UPDATE `Food` SET calories = ? WHERE uid = 53", (20.315,))
     qc.execute("UPDATE `Food` SET calories = ? WHERE uid = 2", (7.2,))
     print(foo.update_sql(), foo.values())
